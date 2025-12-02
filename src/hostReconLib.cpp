@@ -1,24 +1,24 @@
 //****************************************************************************************
 //
 //    Filename:    hostReconLib.cpp
-//    Author:      Kyle McColgan
-//    Date:        18 November 2024
+//    Author:      Kyle D. McColgan (Saint Louis, MO)
+//    Date:        6 November 2025
 //    Description: CLI based networking utility for local network host enumeration.
 //
 //****************************************************************************************
 
 #include "hostReconLib.h"
+
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/ether.h>
-#include <cstring>
 #include <arpa/inet.h>
-#include <algorithm> //For std::reverse()
+#include <cstring>
 #include <cstdlib>
 #include <chrono>
-#include <netinet/in.h> //For struct definitions
-#include <iostream>
+#include <thread>
 
+#include <iostream>
 using namespace std;
 
 //****************************************************************************************
@@ -42,13 +42,19 @@ using namespace std;
  *       from the `source` parameter, ensuring null termination.
  */
 
-void copyAddr(char (*hostList)[16], const char * source, int index)
+void copyAddr(char (*hostList)[16], const char * source, int index) noexcept
 {
-    int adrLen = strlen(source);
-    cout << "Copying " << adrLen << " chars to list at index: " << index << endl;
-    strncpy(hostList[index], source, adrLen);
-    hostList[index][adrLen] = '\0';
-    cout << "\nhostList updated." << endl;
+    if ( ( ! source) || (index < 0) || (index >= MAX_HOSTS) )
+    {
+        return;
+    }
+
+    //cout << "Copying " << adrLen << " chars to list at index: " << index << endl;
+
+    strncpy(hostList[index], source, 15);
+    hostList[index][15] = '\0';
+
+    cout << "\n[INFO] Host list updated.\n";
 }
 
 //****************************************************************************************
@@ -72,25 +78,15 @@ void copyAddr(char (*hostList)[16], const char * source, int index)
  *       of the input integer `num`.
  */
 
-void intToCharArray(int num, char * buffer)
+void intToCharArray(int num, char * buffer) noexcept
 {
-    int i = 0;
-    if (num ==0)
+    //Write decimal string for 0..255.
+    if ( ! buffer)
     {
-        buffer[i++] = '0';
+        return;
     }
-    else
-    {
-        while(num > 0)
-        {
-            buffer[i++] = '0' + (num % 10);
-            num /= 10;
-        }
-    }
-    buffer[i] = '\0';
 
-    //Reverse the buffer...
-    reverse(buffer, buffer + i );
+    snprintf(buffer, 4, "%d", num);
 }
 
 //****************************************************************************************
@@ -113,29 +109,29 @@ void intToCharArray(int num, char * buffer)
  * @post The function returns the computed checksum based on the provided data buffer.
  */
 
-unsigned short computeChecksum(void * data, int length)
+unsigned short computeChecksum(void * data, int length) noexcept
 {
-    unsigned short * buffer = (unsigned short *)data;
-    unsigned int sum = 0;
+    auto * buffer = static_cast<unsigned short *>(data);
+    unsigned long sum = 0;
     unsigned short result;
 
-    for(sum = 0; length > 1; length -= 2)
+    while (length > 1)
     {
         sum += *buffer++;
+        length -= 2;
     }
 
     if (length == 1)
     {
-        sum += *(unsigned char *)buffer;
+        sum += *reinterpret_cast<unsigned char*>(buffer);
     }
 
     sum = (sum >> 16) + (sum & 0xFFFF);
     sum += (sum >> 16);
-    result = ~sum;
+    result = static_cast<unsigned short>(~sum);
 
     return result;
 }
-
 
 //****************************************************************************************
 
@@ -150,14 +146,14 @@ unsigned short computeChecksum(void * data, int length)
  * @param user       A user-defined data pointer passed by `pcap_dispatch`. In this
  *                   implementation, it is a pointer to a `context` object that contains
  *                   relevant state information for the network scan.
- * @param pkthdr     A pointer to the packet header structure (`pcap_pkthdr`)
+ * @param header     A pointer to the packet header structure (`pcap_pkthdr`)
  *                   containing metadata about the captured packet, such as its
  *                   length, captured length, and timestamp.
- * @param capPacket  A pointer to the raw packet data captured by `pcap_dispatch`.
+ * @param packet  A pointer to the raw packet data captured by `pcap_dispatch`.
  *                   This includes the packet's payload and headers (e.g., Ethernet, IP, etc.).
  *
  * @pre  The `user`, `pkthdr`, and `capPacket` pointers must all be valid. The `user`
- *       parameter must point to a properly initialized `context` object. The `capPacket`
+ *       parameter must point to a properly initialized `context` object. The `packet`
  *       buffer must contain at least `pkthdr->caplen` bytes.
  * @post The captured packet is processed as defined by the implementation. Any
  *       resulting data or state changes should be managed through the `context` object
@@ -167,57 +163,258 @@ unsigned short computeChecksum(void * data, int length)
  *       specified packet limit is reached or an error occurs.
  */
 
-static void callBack(u_char * user, const struct pcap_pkthdr * pkthdr, const u_char * capPacket)
+void callBack(u_char * user, const pcap_pkthdr * header, const u_char * packet)
 {
-    auto context = reinterpret_cast<CaptureContext*>(user);
+    if ( ( ! user) || ( ! packet) )
+    {
+        return;
+    }
 
-    const int ethHeaderLen = 14;
-
+    auto * context = reinterpret_cast<CaptureContext*>(user);
     context->result = false;
 
-    struct ip * ipHeader = (struct ip *)(capPacket + ethHeaderLen); //Skip Ethernet header...
+    constexpr int ETH_HDR_LEN = 14;
+    const auto * ipHeader = reinterpret_cast<const ip *>(packet + ETH_HDR_LEN); //Skip Ethernet header...
 
-    if(ipHeader->ip_p == IPPROTO_ICMP)
+    if (ipHeader->ip_p != IPPROTO_ICMP)
     {
-        char sourceStr[INET_ADDRSTRLEN];
-        char destStr[INET_ADDRSTRLEN];
-        char target[INET_ADDRSTRLEN];
-
-        inet_ntop(AF_INET, &(ipHeader->ip_src.s_addr), sourceStr, INET_ADDRSTRLEN);
-        inet_ntop(AF_INET, &(ipHeader->ip_dst.s_addr), destStr, INET_ADDRSTRLEN);
-        inet_ntop(AF_INET, &(context->destination), target, INET_ADDRSTRLEN);
-
-        //Uncomment line below for debugging purposes:
-        //cout << "Captured packet from: " << sourceStr << " to " << destStr << endl;
-
-        if (strcmp(sourceStr, target) == 0)
-        {
-            int ipHeaderLen = ipHeader->ip_hl * 4;
-
-            struct icmphdr * icmpHeader = (struct icmphdr *)(capPacket + ethHeaderLen + ipHeaderLen);
-
-            if ( ( icmpHeader->type ) == ( ICMP_ECHOREPLY) )
-            {
-                cout << "Received ICMP ECHO Reply packet from " << sourceStr << endl;
-                context->result = true;
-                pcap_breakloop(context->captureSession);
-            }
-            else
-            {
-                cout << "ICMP type " << static_cast<int>(icmpHeader->type) << " received, ignoring..." << endl;
-            }
-        }
-        else
-        {
-            //cout << "Response from a different host. Skipping..." << endl;
-            //cout << ".";
-            cout << endl;
-        }
+        return;
     }
-    else
+
+    char sourceStr[INET_ADDRSTRLEN]{};
+    char destStr[INET_ADDRSTRLEN]{};
+    char targetStr[INET_ADDRSTRLEN]{};
+
+    inet_ntop(AF_INET, &ipHeader->ip_src, sourceStr, sizeof(sourceStr));
+    inet_ntop(AF_INET, &ipHeader->ip_dst, destStr, sizeof(destStr));
+    inet_ntop(AF_INET, &context->destination, targetStr, sizeof(targetStr));
+
+    //Uncomment line below for debugging purposes:
+    //cout << "Captured packet from: " << sourceStr << " to " << destStr << endl;
+
+    if (strcmp(sourceStr, targetStr) != 0)
     {
-        cout << "Not an ICMP packet. Skipping..." << endl;
+        return;
     }
+
+    int ipHeaderLen = ipHeader->ip_hl * 4;
+    const auto * icmpHeader = reinterpret_cast<const icmphdr *>(packet + ETH_HDR_LEN + ipHeaderLen);
+
+    if ( (icmpHeader->type) == (ICMP_ECHOREPLY) )
+    {
+        cout << "Reply from " << sourceStr << '\n';
+        context->result = true;
+        pcap_breakloop(context->captureSession);
+    }
+}
+
+//****************************************************************************************
+
+#pragma pack(push, 1)
+struct arp_hdr
+{
+    uint16_t htype; //Hardware type (1 = Ethernet).
+    uint16_t ptype; //Protocol type (0x0800 = IPv4).
+    uint8_t hlen; //Hardware size (6).
+    uint8_t plen; //Protocol size (4).
+    uint16_t oper; //Opcode (1 = request, 2 = reply).
+    uint8_t sha[6]; //Sender hardware address.
+    uint8_t spa[4]; //Sender protocol address.
+    uint8_t tha[6]; //Target hardware address.
+    uint8_t tpa[4]; //Target protocol address.
+};
+#pragma pack(pop)
+
+struct ArpResolveContext
+{
+    in_addr_t targetAddr; //Network-order 32-bit.
+    uint8_t * out_mac; //Pointer to 6-byte output buffer.
+    bool found;
+    pcap_t * capture;
+};
+
+/**
+ * @brief Callback function invoked by libpcap for each captured packet.
+ *
+ * This function inspects incoming packets, filters for ARP replies,
+ * and checks whether the sender protocol address (SPA) matches the
+ * current target host being resolved. If a match is found, it copies
+ * the sender hardware address (SHA) into the CaptureContext result field
+ * and marks the resolution as complete.
+ *
+ * @param user       A pointer to a CaptureContext structure containing
+ *                   session data and the expected target address.
+ * @param header     The pcap_pkthdr structure containing packet metadata.
+ * @param packet     The raw packet data captured by libpcap.
+ *
+ * @pre  The CaptureContext pointer (user) must be non-null and initalized.
+ * @pre The pcap capture session must have an active filter for ARP or ICMP.
+ *
+ * @post If an ARP reply matches the target IP, the target's MAC address
+ *       is stored in context->result, and context->resolved is set to true.
+ *
+ * @note This function ignores all non-ARP packets and mismatched ARP replies.
+ * @note Uses memcpy() to safely extract the sender protocol address (SPA).
+ */
+
+void arpCallBack(u_char * user, const pcap_pkthdr * header, const u_char * packet)
+{
+    if ( ( ! user) || ( ! packet) )
+    {
+        return;
+    }
+
+    auto * context = reinterpret_cast<ArpResolveContext*>(user);
+
+    //Expect: Ethernet header (14) + ARP header.
+    const int ETH_HDR_LEN = 14;
+    const struct ethhdr * eth = reinterpret_cast<const struct ethhdr*>(packet);
+
+    //Check ethertype == ARP.
+    if (ntohs(eth->h_proto) != ETH_P_ARP)
+    {
+        return;
+    }
+
+    const arp_hdr * arp = reinterpret_cast<const arp_hdr*>(packet + ETH_HDR_LEN);
+
+    //Check it's an ARP reply.
+    if (ntohs(arp->oper) != 2)
+    {
+        return;
+    }
+
+    //Compare sender protocol address (tpa) to our requested target.
+    uint32_t spa;
+    memcpy(&spa, arp->spa, 4);
+
+    if (spa != context->targetAddr)
+    {
+        return;
+    }
+
+    //Found it: copy sender hardware address (sha) to out_mac.
+    memcpy(context->out_mac, arp->sha, 6);
+    context->found = true;
+
+    //Break out of pcap_loop().
+    if (context->capture)
+    {
+        pcap_breakloop(context->capture);
+    }
+}
+
+/**
+ * @brief Resolves the MAC address of a given IPv4 host using ARP requests.
+ *
+ * This function sends an ARP request targeting the specified IPv4 address
+ * and waits for a reply within a given timeout. It captures incoming ARP
+ * responses via pcap and uses arpCallBack() to process them. On success,
+ * the target host's MAC address is written into the provided buffer.
+ *
+ * @param targetIP   The IPv4 address (in network byte order) to resolve.
+ * @param context    A reference to a CaptureContext structure containing both
+ *                   the send and capture sessions and the target IP address.
+ * @param out_mac    Output buffer (6 bytes) to receive the resolved MAC address.
+ * @param timeout_ms
+ *
+ * @return true if the MAC address was successfully resolved; false otherwise.
+ *
+ * @pre context.captureSession and context.sendSession must both be valid
+ *      pcap_t * handles opened on the same network interface.
+ * @pre targetIP must be within the same subnet as the capture interface.
+ *
+ * @post On success, targetMAC contains the hardware address corresponding
+ *       to targetIP, and context.result is updated with the same value.
+ *
+ * @note This function performs direct ARP resolution and does not reply on
+ *       the system ARP cache. It uses pcap_inject() for sending raw packets.
+ * @note Timeouts or missing responses will result in a false return value.
+ */
+
+bool resolveMAC(const char * targetIP, CaptureContext & context, uint8_t out_mac[6], int timeout_ms)
+{
+    if ( (!targetIP) || (!context.sendSession) || (!context.captureSession) || (!out_mac) )
+    {
+        return false;
+    }
+
+    // LOCAL settings - plan to replace with auto-detect later...
+    const uint8_t LOCAL_MAC[6] = {0x00, 0xD8, 0x61, 0xAB, 0x11, 0x03};
+    const char LOCAL_IP_STR[] = "192.168.1.110"; // Must match the capture local IP.
+
+    // Prepare addresses.
+    in_addr target_in;
+    if (inet_pton(AF_INET, targetIP, &target_in) != 1)
+    {
+        return false;
+    }
+
+    in_addr local_in;
+    if (inet_pton(AF_INET, LOCAL_IP_STR, &local_in) != 1)
+    {
+        return false;
+    }
+
+    // Build Ethernet (broadcast) + ARP request.
+    const int ETH_LEN = sizeof(struct ethhdr);
+    const int ARP_LEN = sizeof(arp_hdr);
+    const int PKT_LEN = ETH_LEN + ARP_LEN;
+    unsigned char packet [PKT_LEN];
+    memset(packet, 0, PKT_LEN);
+
+    // Ethernet header: dest = broadcast, src = local, protocol = ARP.
+    struct ethhdr eth;
+    memset(&eth, 0, sizeof(eth));
+    memset(eth.h_dest, 0xff, ETH_ALEN);
+    memcpy(eth.h_source, LOCAL_MAC, 6);
+    eth.h_proto = htons(ETH_P_ARP);
+    memcpy(packet, &eth, sizeof(eth));
+
+    // ARP header: request.
+    arp_hdr arp;
+    arp.htype = htons(1); //Ethernet.
+    arp.ptype = htons(ETH_P_IP); //IPv4.
+    arp.hlen = 6;
+    arp.plen = 4;
+    arp.oper = htons(1); //ARP request.
+    memcpy(arp.sha, LOCAL_MAC, 6); //Our MAC.
+    memcpy(arp.spa, &local_in.s_addr, 4); //Our IP address (in network order).
+    memset(arp.tha, 0x00, 6); //Target MAC = currently unknown.
+    memcpy(arp.tpa, &target_in.s_addr, 4); //Target IP address.
+
+    memcpy(packet + ETH_LEN, &arp, sizeof(arp));
+
+    // Setup the context for callbacks.
+    ArpResolveContext arc{};
+    arc.targetAddr = target_in.s_addr; //In network byte order.
+    arc.out_mac = out_mac;
+    arc.found = false;
+    arc.capture = context.captureSession;
+
+    // Send the ARP request (try a couple of times).
+    const int numTries = 2;
+    for (int attempt = 0; (attempt < numTries) && ( ! arc.found); ++ attempt)
+    {
+        //pcap_dispatch(context.captureSession, 0, nullptr, nullptr);
+        if (pcap_inject(context.sendSession, packet, PKT_LEN) == -1)
+        {
+            cerr << "[ERROR] resolveMAC: pcap_inject(): " << pcap_geterr(context.sendSession) << endl;
+            return false;
+        }
+
+        // Wait for a reply using pcap_dispatch. It will return when arpCallBack calls pcap_breakloop.
+        // Use a small number of packets; pcap_dispatch respects the capture session timeout set above.
+        int rc = pcap_dispatch(context.captureSession, -1, arpCallBack, reinterpret_cast<u_char*>(&arc));
+        if (rc == -1)
+        {
+            // error; continue to next attempt.
+        }
+
+        //If arc.found is set, we have found the MAC.
+    }
+
+    return arc.found;
 }
 
 //****************************************************************************************
@@ -247,90 +444,120 @@ static void callBack(u_char * user, const struct pcap_pkthdr * pkthdr, const u_c
  *       or multiple destinations. In the calling function, the `context.result`
  *       should be checked to determine if the destination is active.
  *
+ * @note ***Disclaimer***: Using broadcast MAC for local network ping sweeping. Some devices may
+ *       ignore broadcast ICMP, but this works reliably on flat LANs. In the future,
+ *       we may consider implementing real per-host ARP resolution to support any network.
+ *
  * @see `getHosts()` for an example of how this function is used in a scanning loop.
  */
 
 bool pingSweep(char (&destination)[16], CaptureContext & context)
 {
     bool result = false;
-    struct ip ipHdr;
-    struct icmphdr msgHdr;
-    unsigned char myPacket[sizeof(struct ethhdr) + sizeof(struct ip) + sizeof(struct icmphdr)];
 
-    // Initialize the destination IP in the context struct
+    if ( (!context.sendSession) || (!context.captureSession) )
+    {
+        return false;
+    }
+
+    // Initialize the destination IP in the context struct.
     inet_pton(AF_INET, destination, &context.destination);
 
-    // Fill in the Ethernet header
+    // Resolve the destination MAC address with ARP.
+    uint8_t targetMAC[6]{};
+    cout << "[INFO] Resolving MAC for: " << destination << "...\n";
+
+    if ( ! resolveMAC(destination, context, targetMAC, 1000))
+    {
+        cout << "[WARN] Failed to resolve the MAC address for: " << destination
+             << ". Skipping host.\n";
+
+        return false;
+    }
+
+    cout << "[OK] MAC address resolved for: " << destination << ": ";
+    for (int i = 0; i < 6; ++ i)
+    {
+        printf("%02X%s", targetMAC[i], (i < 5 ? ":" : ""));
+    }
+    cout << "\n";
+
+    //Build the ethernet + IP + ICMP without payload.
+    unsigned char myPacket[sizeof(struct ethhdr) + sizeof(struct ip) + sizeof(struct icmphdr)]; memset(myPacket, 0, sizeof(myPacket));
+
+    // Fill in the Ethernet header.
     struct ethhdr ethHdr;
-    memset(&ethHdr, 0, sizeof(struct ethhdr));
-    memset(&ethHdr.h_dest, 0xff, ETH_ALEN); // Broadcast MAC address
-    ethHdr.h_source[0] = 0x00; // Set your own MAC address
+    memset(&ethHdr, 0, sizeof(ethHdr));
+    memcpy(ethHdr.h_dest, targetMAC, 6); // Use the resolved MAC address here.
+    ethHdr.h_source[0] = 0x00; // Set your own MAC address.
     ethHdr.h_source[1] = 0xD8;
     ethHdr.h_source[2] = 0x61;
     ethHdr.h_source[3] = 0xAB;
     ethHdr.h_source[4] = 0x11;
     ethHdr.h_source[5] = 0x03;
-    ethHdr.h_proto = htons(ETH_P_IP); // Protocol type for IP
+    ethHdr.h_proto = htons(ETH_P_IP); // Protocol type for IP.
 
-    // Fill in the IP header
-    memset(&ipHdr, 0, sizeof(struct ip));
-    ipHdr.ip_hl = 5; // Header length
-    ipHdr.ip_v = 4; // IP version
-    ipHdr.ip_tos = 0; // Type of service
-    ipHdr.ip_len = htons(sizeof(struct ip) + sizeof(struct icmphdr)); // Total length
-    ipHdr.ip_id = htons(54321); // Identification
-    ipHdr.ip_off = 0; // Fragment Offset
-    ipHdr.ip_ttl = 64; // Time to live
-    ipHdr.ip_p = IPPROTO_ICMP; // Protocol (ICMP)
+    // Fill in the IP header.
+    struct ip ipHdr;
+    memset(&ipHdr, 0, sizeof(ipHdr));
+    ipHdr.ip_hl = 5; // Header length.
+    ipHdr.ip_v = 4; // IP version.
+    ipHdr.ip_tos = 0; // Type of service.
+    ipHdr.ip_len = htons(sizeof(struct ip) + sizeof(struct icmphdr)); // Total length.
+    ipHdr.ip_id = htons(54321); // Identification.
+    ipHdr.ip_off = 0; // Fragment Offset.
+    ipHdr.ip_ttl = 64; // Time to live.
+    ipHdr.ip_p = IPPROTO_ICMP; // Protocol (ICMP).
     ipHdr.ip_sum = 0; // Checksum
-    inet_pton(AF_INET, "192.168.1.110", &ipHdr.ip_src); // Source IP
-    inet_pton(AF_INET, destination, &ipHdr.ip_dst); // Destination IP
-    ipHdr.ip_sum = computeChecksum((unsigned short *)&ipHdr, sizeof(struct ip)); // Calculate checksum
+    inet_pton(AF_INET, "192.168.1.110", &ipHdr.ip_src); // Choose the correct local IP.
+    inet_pton(AF_INET, destination, &ipHdr.ip_dst); // Destination IP.
+    ipHdr.ip_sum = computeChecksum(&ipHdr, sizeof(ipHdr)); // Calculate checksum.
 
-    // Fill in the ICMP header
-    memset(&msgHdr, 0, sizeof(struct icmphdr));
-    msgHdr.type = ICMP_ECHO; // ICMP Echo request type
-    msgHdr.code = 0; // Code
-    msgHdr.checksum = 0; // Checksum
-    msgHdr.un.echo.id = htons(1234); // Identifier
-    msgHdr.un.echo.sequence = htons(1); // Sequence number
-    msgHdr.checksum = computeChecksum((unsigned short *)&msgHdr, sizeof(struct icmphdr)); // Calculate checksum
+    // Fill in the ICMP header.
+    struct icmphdr icmpHdr;
+    memset(&icmpHdr, 0, sizeof(struct icmphdr));
+    icmpHdr.type = ICMP_ECHO; // ICMP Echo request type.
+    icmpHdr.code = 0; // Code.
+    icmpHdr.un.echo.id = htons(1234); // Identifier.
+    icmpHdr.un.echo.sequence = htons(1); // Sequence number.
+    icmpHdr.checksum = 0; // Checksum.
+    icmpHdr.checksum = computeChecksum(&icmpHdr, sizeof(icmpHdr)); // Calculate checksum.
 
-    // Construct the packet by combining the headers
-    memcpy(myPacket, &ethHdr, sizeof(struct ethhdr));
-    memcpy(myPacket + sizeof(struct ethhdr), &ipHdr, sizeof(struct ip));
-    memcpy(myPacket + sizeof(struct ethhdr) + sizeof(struct ip), &msgHdr, sizeof(struct icmphdr));
+    // Construct the full packet by combining the headers.
+    memcpy(myPacket, &ethHdr, sizeof(ethHdr));
+    memcpy(myPacket + sizeof(ethHdr), &ipHdr, sizeof(ipHdr));
+    memcpy(myPacket + sizeof(ethHdr) + sizeof(ipHdr), &icmpHdr, sizeof(icmpHdr));
 
-    // Send the packet using pcap_inject
-    cout << "\n***Pinging " << destination << "..." << endl;
-    if (pcap_inject(context.sendSession, myPacket, sizeof(myPacket)) == -1) {
-        cout << "Error sending the packet: " << pcap_geterr(context.sendSession) << endl;
+    // Send the packet using pcap_inject.
+    cout << "***Pinging " << destination << "..." << endl;
+    if (pcap_inject(context.sendSession, myPacket, sizeof(myPacket)) == -1)
+    {
+        cout << "[ERROR] pcap_inject(): " << pcap_geterr(context.sendSession) << endl;
         return false;
     }
 
-    //cout << "\n***Searching for a response..." << endl;
-
-    // Use pcap_dispatch for a specified number of packets
-    if (pcap_dispatch(context.captureSession, 10, callBack, reinterpret_cast<u_char *>(&context)) == -1) {
-        cout << "Error in pcap_dispatch(): " << pcap_geterr(context.captureSession) << endl;
+    // capture: dispatch a small number of packets. context.result will be set in the callBack.
+    int captured = pcap_dispatch(context.captureSession, 50, callBack, reinterpret_cast<u_char *>(&context));
+    if (captured == -1)
+    {
+        cout << "[ERROR] pcap_dispatch(): " << pcap_geterr(context.captureSession) << endl;
         return false;
     }
 
-    // Check the result after capturing packets
+    // Check the result after capturing packets.
     if (context.result)
     {
-        cout << "Response received from " << destination << endl;
-        cout << "Host " << destination << " is active!" << endl;
+        cout << "Destination " << destination << " is active!" << endl;
         result = true;
     }
     else
     {
-        cout << "No response." << endl;
         cout << "Host " << destination << " is inactive." << endl;
     }
 
     return result;
 }
+
 //****************************************************************************************
 
 /**
@@ -366,48 +593,32 @@ bool pingSweep(char (&destination)[16], CaptureContext & context)
 void getHosts(char (*hostList)[16], int &numHosts, CaptureContext & context)
 {
     const char base[] = "192.168.1.";
-    char destIP[16];
+    char destIP[16]{};
     int hostCount = 0;
 
-    for (int i = 1; i < 255; i++)
+    for (int i = 90; i <= 254; ++ i)
     {
-        strcpy(destIP, base);
-        char suffix[4];
-        intToCharArray(i, suffix);
-        strcat(destIP, suffix);
+        intToCharArray(i, destIP);
 
-        //cout << "***Pinging " << destIP << "...\n";
-
+        //Build the full IP.
+        char fullIP[16];
+        snprintf(fullIP, sizeof(fullIP), "%s%s", base, destIP);
         context.result = false;
 
-        // Start timing for response
-        auto startTime = std::chrono::steady_clock::now();
-        while (std::chrono::steady_clock::now() - startTime < std::chrono::milliseconds(2000))
+        if (pingSweep(fullIP, context))
         {
-            // Call pingSweep with the correct context
-            pingSweep(destIP, context);
-
-            // Check if we got a response
-            if (context.result)
+            if (hostCount < MAX_HOSTS)
             {
-                //cout << "Host " << destIP << " is active.\n";
-                if (hostCount < MAX_HOSTS)
-                {
-                    copyAddr(hostList, destIP, hostCount);
-                    hostCount++;
-                }
-                else
-                {
-                    cout << "Error: hostList is full, unable to add more hosts." << endl;
-                    break;
-                }
+                copyAddr(hostList, fullIP, hostCount);
+                ++ hostCount;
+            }
+            else
+            {
                 break;
             }
         }
-
-        // if (!context.result) {
-        //     cout << "Inactive host detected. Skipping...\n";
-        // }
+        //Pause to avoid flooding...
+        this_thread::sleep_for(chrono::milliseconds(50));
     }
 
     numHosts = hostCount;
@@ -438,18 +649,18 @@ void getHosts(char (*hostList)[16], int &numHosts, CaptureContext & context)
  *       are excluded from the output.
  */
 
-void filterSpecialChars(const char * address, char * filtered)
+void filterSpecialChars(const char * address, char * filtered) noexcept
 {
     int index = 0;
 
-    for ( int i = 0; address[i] != '\0'; i ++)
+    for (int i = 0; address[i] != '\0'; ++ i)
     {
-        if(isdigit(address[i]) || address[i] == '.')
+        if ( (isdigit(static_cast<unsigned char>(address[i])) || (address[i] == '.') ))
         {
-            filtered[index] = address[i];
-            index ++;
+            filtered[index ++] = address[i];
         }
     }
+
     filtered[index] = '\0';
 }
 
@@ -473,62 +684,17 @@ void filterSpecialChars(const char * address, char * filtered)
  *       handle edge cases like addresses with leading zeros or malformed segments.
  */
 
-bool isValidIPAddress(const char* address)
+bool isValidIPAddress(const char* address) noexcept
 {
-    int numDots = 0;
-    int numDigits = 0;
-    int currentOctetValue = 0;
-    bool result = true;
-
-    if (address == nullptr)
+    if ( !address )
     {
         return false;
     }
 
-    while (*address)
-    {
-        if (*address == '.')
-        {
-            numDots++;
-
-            // After the last digit of an octet, check the octet value
-            if ( ( numDigits == 0 ) || ( numDigits > 3 ) || ( currentOctetValue > 255) )
-            {
-                result = false;
-            }
-
-            // Reset for next octet
-            currentOctetValue = 0;
-            numDigits = 0;
-        }
-        else if ( ( *(address) >= '0') && ( *(address) <= '9') )
-        {
-            currentOctetValue = currentOctetValue * 10 + (*address - '0');
-            numDigits++;
-        }
-        else
-        {
-            result = false;
-            break;
-        }
-
-        address++;
-    }
-
-    // Final validation for the last octet
-    if ( (numDigits == 0) || (numDigits > 3) || (currentOctetValue > 255) )
-    {
-        result = false;
-    }
-
-    // IP should have exactly 3 dots
-    if (numDots != 3)
-    {
-        result = false;
-    }
-
-    return result;
+    sockaddr_in sa{};
+    return inet_pton(AF_INET, address, &(sa.sin_addr)) == 1;
 }
+
 //****************************************************************************************
 
 /**
@@ -554,19 +720,22 @@ bool isValidIPAddress(const char* address)
  *       It assumes that all IP addresses in `hostList` are valid and formatted correctly.
  */
 
-bool inList(const char* address, char (*hostList)[16], int listSize)
+bool inList(const char * address, char (*hostList)[16], int listSize) noexcept
 {
-    bool result = false;
-
-    for (int i = 0; i < listSize; i ++)
+    if ( ! address)
     {
-        if(strcmp(address, hostList[i]) == 0)
+        return false;
+    }
+
+    for (int i = 0; i < listSize; ++ i)
+    {
+        if (strcmp(address, hostList[i]) == 0)
         {
-            result = true; //Return true if the host is already in the list...
+            return true; //Return true if the host is already in the list...
         }
     }
 
-    return result;
+    return false;
 }
 
 //****************************************************************************************
@@ -589,19 +758,16 @@ bool inList(const char* address, char (*hostList)[16], int listSize)
  * @note This function assumes that each entry in the `hostList` is a valid, null-terminated IP address.
  */
 
-void displayHostList(char (*hostList)[16], int numHosts)
+void displayHostList(char (*hostList)[16], int numHosts) noexcept
 {
-    //cout << "\n\nPrinting list with " << numHosts << " hosts included." << endl;
-    //cout << "*****************************************" << endl;
-    cout << "Active Hosts List: " << endl;
+    cout << "\nActive Hosts (" << numHosts << "):\n";
 
-    for (int i = 0; i < numHosts; i ++)
+    for (int i = 0; i < numHosts; ++ i)
     {
-        cout << i + 1 << ". " << hostList[i] << endl;
+        cout << i + 1 << ". " << hostList[i] << '\n';
     }
-    //cout << "*****************************************" << endl;
-    cout << "----------------------------------" << endl;
-    //cout << "\nDone." << endl;
+
+    cout << "---------------------------------\n";
 }
 
 //****************************************************************************************
@@ -622,16 +788,16 @@ void displayHostList(char (*hostList)[16], int numHosts)
 
 void openNetworkInterface()
 {
-    pcap_t * session;
-
     char errors [PCAP_ERRBUF_SIZE];
-    cout << "\n***Opening session..." << endl;
+    pcap_t * session = pcap_open_live("enp34s0", BUFSIZ, 1, 1000, errors);
 
-    session = pcap_open_live("enp34s0", BUFSIZ, 1, 1000, errors);
-
-    if(session == NULL)
+    if ( ! session)
     {
-        cout << "Error opening the NIC: " << errors << endl;
+        cerr << "[ERROR] openNetworkInterface(): " << errors << endl;
+    }
+    else
+    {
+        pcap_close(session);
     }
 }
 
@@ -658,25 +824,17 @@ void openNetworkInterface()
 void extractDeviceInfo(const u_char * packet, char (&source)[16], char(&destination)[16])
 {
     //Extract device information from the packet...(IPs, MACs)
+    if ( ! packet)
+    {
+        source[0] = destination[0] = '\0';
+        return;
+    }
 
     //Assuming IPv4 packet structure...
-    // struct ip *ip_header = (struct ip*) (packet + SIZE_ETHERNET); //Assuming Ethernet frame...
-    struct ip *ip_header = (struct ip*) (packet + 14); //Assuming Ethernet frame...
+    const auto * ipHeader = reinterpret_cast<const ip*>(packet + 14); //Assuming Ethernet frame...
 
-    //Extract source and destination IP addresses...
-    char sourceIP[INET_ADDRSTRLEN];
-    char destinationIP[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(ip_header->ip_src), sourceIP, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &(ip_header->ip_dst), destinationIP, INET_ADDRSTRLEN);
-
-    // //Print the extracted IP addresses...
-    // cout << "Source IP: " << sourceIP << endl;
-    // cout << "Destination IP: " << destinationIP << endl;
-
-    //cout << "Copying..." << endl;
-    //cout << "Before source: " << sourceIP << endl;
-    strncpy(source, sourceIP, sizeof(source));
-    strncpy(destination, destinationIP, sizeof(destination));
+    inet_ntop(AF_INET, &ipHeader->ip_src, source, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &ipHeader->ip_dst, destination, INET_ADDRSTRLEN);
 }
 
 //****************************************************************************************

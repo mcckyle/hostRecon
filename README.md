@@ -1,16 +1,18 @@
-![Workflow Status](https://github.com/kmccol1/hostRecon/actions/workflows/cpp.yml/badge.svg)
+![Workflow Status](https://github.com/mcckyle/hostRecon/actions/workflows/cpp.yml/badge.svg)
 
 # hostRecon
 
+## Intelligent Local Network Discovery with libpcap
+
 ## Overview
 
-**hostRecon** is a fast, efficient, and easy-to-use CLI-based network scanner that facilitates host discovery and availability checks on local networks. Leveraging the power of `libpcap`, this tool performs network reconnaissance through ICMP Echo Request (ping) messages and captures responses from live hosts. It’s a valuable tool for network administrators, cybersecurity professionals, and anyone wanting to explore their local network.
+**hostRecon** is a simple, lightweight, CLI-based network scanner for discovering active hosts on local networks. Powered by `libpcap`, it performs low-level packet injection and capture for precise and reliable network reconnaissance. This tool is ideal for developers, sysadmins, cybersecurity enthusiasts seeking a deeper look at the devices on their LAN.
 
 ## Table of Contents
 
 - [Features](#features)
 - [Installation](#installation)
-- [Usage](#usage)
+- [Build](#usage)
 - [Current State](#current-state)
 - [Future State](#future-state)
 - [Contributing](#contributing)
@@ -18,64 +20,33 @@
 
 ## Features
 
-- **Fast & Efficient**: Designed for quick host discovery via ICMP Echo Requests.
-- **Low-Level Packet Manipulation**: Uses `libpcap` for low-level packet capture and injection.
-- **Multi-Host Scanning**: Allows the concurrent scanning of multiple hosts to save time.
-- **Customizable Network Configuration**: Set custom source and destination IP addresses.
-- **Real-Time Active Host Display**: Instantly shows hosts that are up and responsive.
-- **Error Resilience**: Includes robust error handling for packet capture failures and network interface issues.
+- **Accurate Host Detection**: Uses ARP and ICMP scanning to identify active devices on the local network.
+- **Low-Level Network Access**: Builds and injects Ethernet, IP, and ICMP frames directly with `libpcap`.
+- **Real-Time Output**: Displays responsive hosts immediately during scanning.
+- **Error-Resilient**: Gracefully handles interface, packet, and permission-related failures.
+- **Extensible Architecture** - Clean, modular design for future protocol and feature expansion.
 
 ## Installation
 
-### Prerequisites
+### Requirements
 
 To run **hostRecon**, you will need the following:
 
-- **[libpcap](https://www.tcpdump.org/)**:
-  - A packet capture library required for capturing and injecting packets.
-  - Install via your package manager:
+- **[libpcap](https://www.tcpdump.org/)** - For packet capture/injection:
+  - Ubuntu/Debian: ```bash sudo apt install libpcap-dev```
+  - Fedora: ```bash sudo dnf install libpcap-devel```
+  - macOS: ```bash brew install libpcap```
 
-    For Ubuntu/Debian:
+- **C++17 or newer** compiler (`g++`, `clang++`, etc.):
 
-    ```bash
-    sudo apt-get install libpcap-dev
-    ```
+- **CMake** (optional, but recommended).
 
-    For Fedora:
-
-    ```bash
-    sudo dnf install libpcap-devel
-    ```
-
-    For macOS:
-
-    ```bash
-    brew install libpcap
-    ```
-
-- **C++ Compiler**:
-  - A C++ compiler such as `g++`, `clang++`, or any standard C++ compiler.
-
-- **CMake** (Optional for build automation):
-  - While optional, **CMake** is recommended for automating the build process, especially for larger projects.
-  - Installation (for Linux):
-
-    ```bash
-    sudo apt-get install cmake
-    ```
-
-    For macOS:
-
-    ```bash
-    brew install cmake
-    ```
-
-### Steps
+### Build
 
 1. Clone this repository:
 
    ```bash
-   git clone https://github.com/kmccol1/hostRecon.git
+   git clone https://github.com/mcckyle/hostRecon.git
    cd hostRecon
    ```
 
@@ -109,28 +80,27 @@ To run **hostRecon**, you will need the following:
 
 ## Usage
 
-Once compiled, **hostRecon** can be run from the command line. The tool will automatically detect and scan the local subnet for active hosts, displaying the list of hosts that respond to the ICMP Echo Request.
-
-### Example:
+Simply execute
 
 ```bash
 sudo ./networkScanner
 ```
 
-The tool will output the list of active hosts in your local network.
+**hostRecon** automatically identifies your active network interfaces and scans the
+local subnet for reachable hosts. Each responsive device is printed in real-time, showing its IP and MAC address.
 
 ## Current State
 
 As of now, **hostRecon** provides the following functionality:
 
-- Establishes a capture session to listen for ICMP Echo Replies.
-- Constructs and sends ICMP Echo Request packets to specified IP addresses in a /24 subnet.
-- Captures responses and accurately identifies active hosts based on received packets.
-- Displays the results in a clear and concise format.
+- Direct ARP-based host discovery on local networks.
+- ICMP echo (ping) scanning for active device verification.
+- Real-time result display with informative status output.
+- Reliable interface initalization and error handling.
 
-### Current Limitations:
-- **Single-threaded Operation**: Scans hosts sequentially, which may limit speed in larger networks.
-- **Limited Protocol Support**: Currently supports only ICMP-based host discovery.
+### Known Limitations:
+- **Single-threaded Scanning**: Scans hosts sequentially, which may limit speed in larger networks.
+- **Routed Scanning**: Focused on local subnet (no routed scanning, yet).
 
 ## Future State
 
