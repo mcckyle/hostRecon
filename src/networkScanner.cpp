@@ -1,146 +1,157 @@
 //****************************************************************************************
 //
 //    Filename:    networkScanner.cpp
-//    Author:      Kyle McColgan
-//    Date:        14 October 2024
-//    Description: CLI based networking utility for local network host enumeration.
+//    Author:      Kyle D. McColgan (Saint Louis, MO)
+//    Date:        6 November 2025
+//    Description: A simple C++17 libpcap-based host scanner.
 //
 //****************************************************************************************
 
-#include <iostream>
 #include "hostReconLib.h"
+#include <iostream>
+
 using namespace std;
 
 //****************************************************************************************
 
 int main()
 {
-    bool result = false;
-    char hostList [MAX_HOSTS][16]; //Assuming each IP addr is stored in a 16-character array.
+    constexpr int TIMEOUT_MS = 2000; //Timeout value in milliseconds.
+    char hostList [MAX_HOSTS][16]{}; //Assuming each IP stored in a 16-character array.
     int numHosts = 0;
-    char sendErrorMsg [PCAP_ERRBUF_SIZE];
-    char capErrorMsg [PCAP_ERRBUF_SIZE];
-    pcap_t * captureSession;
-    pcap_t * sendSession;
-    int timeout = 2000; //Timeout value in milliseconds.
 
-    std::cout << " _               _   ____                          \n";
-    std::cout << "| |__   ___  ___| |_|  _ \\ ___  ___ ____   _____  \n";
-    std::cout << "| '_ \\/ _ \\/ __| __| |_) / _ \\/ __/ _ \\| '_ \\ \n";
-    std::cout << "| | |  | (_) \\__ \\ |_|  _ <  __/ (_| (_) | | | | \n";
-    std::cout << "|_| |_|\\___/|___/\\__|_| \\_\\___|\\____/\\_|_| |_| \n";
-    cout << "----------------------------------\n";
+    char sendError [PCAP_ERRBUF_SIZE]{};
+    char capError [PCAP_ERRBUF_SIZE]{};
+    const char * iface = "enp34s0";
 
-    //Open session handlers with a timeout of 1000 ms...
-    cout << "Initializing network interface sessions...\n";
-    sendSession = pcap_open_live("enp34s0", BUFSIZ, 0, timeout, sendErrorMsg);
-    captureSession = pcap_open_live("enp34s0", BUFSIZ, 0, timeout, capErrorMsg);
+    pcap_t * captureSession = nullptr;
+    pcap_t * sendSession = nullptr;
 
-    if(sendSession == nullptr)
+    cout << "hostRecon - libpcap-based network scanner\n"
+         << "-----------------------------------------\n";
+
+    //Initalize the network session handlers...
+    cout << "Initializing the network interfaces...\n";
+    sendSession = pcap_open_live(iface, BUFSIZ, 1, TIMEOUT_MS, sendError);
+    captureSession = pcap_open_live(iface, BUFSIZ, 1, TIMEOUT_MS, capError);
+
+    if ( ( ! sendSession) || ( ! captureSession) )
     {
-        cerr << "[ERROR] Could not access network interface for injection: " << sendErrorMsg << endl;
+        cerr << "[ERROR] Failed to initalize pcap sessions.\n";
+
+        if (sendSession)
+        {
+            pcap_close(sendSession);
+        }
+
         return 1;
     }
-    else if (captureSession == nullptr)
-    {
-        cerr << "[ERROR] Could not access the network interface for capture: " << capErrorMsg << endl;
-        return 1;
-    }
 
-    cout << "[OK] Network interfaces initialized successfully!\n";
+    pcap_setdirection(captureSession, PCAP_D_INOUT);
+    cout << "[OK] interfaces initialized successfully!\n";
+
+    //Set the packet filter...
+    bpf_program filter;
+    const char filterExp[] = "arp or icmp";
+    cout << "Applying filters...\n";
+    //bpf_u_int32 net = 0, mask = 0;
+
+    // if (pcap_lookupnet(iface, &net, &mask, capError) == -1)
+    // {
+    //     //Not fatal error...continue with net = 0.
+    //     net = 0;
+    // }
 
     //Set the filter for ICMP packets
-    struct bpf_program filter;
-    bpf_u_int32 net;
-    char filterExp[] = "icmp";
     // char filterExp[] = "icmp[icmptype] == icmp-echoreply";
     // char filterExp[] = "icmp and icmp[icmptype] == 0";
     //char filterExp[] = "icmp[icmpcode] == 0 and icmp[icmptype] == 0";
 
-    cout << "Applying ICMP filter...\n";
-
-    //Compile the filter expression...
-    if (pcap_compile(captureSession, &filter, filterExp, 0, net) == -1)
+    if (pcap_compile(captureSession, &filter, filterExp, 1, PCAP_NETMASK_UNKNOWN) == -1 ||
+        pcap_setfilter(captureSession, &filter) == -1)
     {
-        cerr << "[ERROR] Failed to compile filter: " << filterExp << "\n";
-        cerr << "       " << pcap_geterr(captureSession) << "\n";
+        cerr << "[ERROR] Failed to set filter: " << pcap_geterr(captureSession) << '\n';
+
+        pcap_close(sendSession);
+        pcap_close(captureSession);
 
         return 1;
     }
 
-    //Apply the filter expression...
-    if (pcap_setfilter(captureSession, &filter) == -1)
-    {
-        cerr << "[ERROR] Failed to apply filter: " << filterExp << "\n";
-        cerr << "       " << pcap_geterr(captureSession) << "\n";
+    cout << "[OK] Capture filter applied.\n";
 
-        return 1;
-    }
-
-    cout << "[OK] ICMP filter applied successfully!\n";
-    //cout << "----------------------------------" << endl;
-
-    cout << "\nStarting host discovery...\n";
-    CaptureContext context{captureSession, result, .sendSession=sendSession};
-
+    //Begin scan.
+    CaptureContext context(captureSession, sendSession);
+    cout << "\nScanning 192.168.1.1 - 192.168.1.254...\n";
     getHosts(hostList, numHosts, context);
-    cout << "----------------------------------" << endl;
 
-    cout << "Host discovery completed.\n";
+    cout << "\nScan complete.\n";
     displayHostList(hostList, numHosts);
 
-    cout << "\nReleasing resources...\n";
+    //Cleanup.
+    cout << "\nCleaning up...\n";
     pcap_freecode(&filter);
-    pcap_close(context.captureSession);
-    pcap_close(context.sendSession);
-    cout << "[OK] Resources released successfully.\n";
+    pcap_close(captureSession);
+    pcap_close(sendSession);
 
-    cout << "Scan complete.\n";
-    cout << "----------------------------------\n";
+    cout << "[OK] Done.\n";
 
     return 0;
 }
 
 //****************************************************************************************
-
+// std::cout << " _               _   ____                          \n";
+// std::cout << "| |__   ___  ___| |_|  _ \\ ___  ___ ____   _____  \n";
+// std::cout << "| '_ \\/ _ \\/ __| __| |_) / _ \\/ __/ _ \\| '_ \\ \n";
+// std::cout << "| | | | (_) \\__ \\ |_|  _ <  __/ (_| (_) |  | | | \n";
+// std::cout << "|_| |_|\\___/|___/\\__|_| \\_\\___|\\____/\\_|_| |_| \n";
+// Sample output below...
 /*
- _               _   ____
-| |__   ___  ___| |_|  _ \ ___  ___ ____   _____
-| '_ \/ _ \/ __| __| |_) / _ \/ __/ _ \| '_ \
-| | |  | (_) \__ \ |_|  _ <  __/ (_| (_) | | | |
-|_| |_|\___/|___/\__|_| \_\___|\____/\_|_| |_|
-----------------------------------
-Initializing network interface sessions...
-[OK] Network interfaces initialized successfully!
-Applying ICMP filter...
-[OK] ICMP filter applied successfully!
-
-No response.
-Host 192.168.1.253 is inactive.
-
-***Pinging 192.168.1.254...
-
-Received ICMP ECHO Reply packet from 192.168.1.254
-Response received from 192.168.1.254
-Host 192.168.1.254 is active!
-Copying 13 chars to list at index: 13
-
-hostList updated.
-----------------------------------
-Active Hosts List:
-1. 192.168.1.66
-2. 192.168.1.67
-3. 192.168.1.94
-4. 192.168.1.100
-5. 192.168.1.108
-6. 192.168.1.214
-7. 192.168.1.215
-8. 192.168.1.224
-9. 192.168.1.227
-10. 192.168.1.228
-11. 192.168.1.235
-12. 192.168.1.236
-13. 192.168.1.246
-14. 192.168.1.254
-----------------------------------
+ * hostRecon - libpcap-based network scanner
+ * -----------------------------------------
+ * Initializing the network interfaces...
+ * [OK] interfaces initialized successfully!
+ * Applying filters...
+ * [OK] Capture filter applied.
+ *
+ * Scanning 192.168.1.1 - 192.168.1.254...
+ * [INFO] Resolving MAC for: 192.168.1.1...
+ * [WARN] Failed to resolve the MAC address for: 192.168.1.1. Skipping host.
+ *
+ * ...
+ *
+ *
+ * [INFO] Resolving MAC for: 192.168.1.253...
+ * [OK] MAC address resolved for: 192.168.1.253: A0:72:2C:67:88:94
+ * ***Pinging 192.168.1.253...
+ * Reply from 192.168.1.253
+ * Destination 192.168.1.253 is active!
+ *
+ * [INFO] Host list updated.
+ * [INFO] Resolving MAC for: 192.168.1.254...
+ * [OK] MAC address resolved for: 192.168.1.254: BC:9A:8E:20:22:F1
+ * ***Pinging 192.168.1.254...
+ * Host 192.168.1.254 is inactive.
+ *
+ * Scan complete.
+ *
+ * Active Hosts (13):
+ * 1. 192.168.1.94
+ * 2. 192.168.1.100
+ * 3. 192.168.1.102
+ * 4. 192.168.1.103
+ * 5. 192.168.1.201
+ * 6. 192.168.1.205
+ * 7. 192.168.1.224
+ * 8. 192.168.1.225
+ * 9. 192.168.1.228
+ * 10. 192.168.1.235
+ * 11. 192.168.1.245
+ * 12. 192.168.1.246
+ * 13. 192.168.1.253
+ * ---------------------------------
+ *
+ * Cleaning up...
+ * [OK] Done.
+ *
 */

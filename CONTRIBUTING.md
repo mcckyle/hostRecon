@@ -14,18 +14,18 @@ Start by forking the repository to your own GitHub account.
 
 Clone the forked repository to your local machine:
 
-\`\`\`bash
+```bash
 git clone https://github.com/<your-username>/hostRecon.git
 cd hostRecon
-\`\`\`
+```
 
 ### 3. Create a new branch
 
 Before making any changes, create a new branch from \`main\`:
 
-\`\`\`bash
+```bash
 git checkout -b feature-branch
-\`\`\`
+```
 
 ### 4. Make your changes
 
@@ -35,9 +35,9 @@ Work on your changes, ensuring they follow the project's coding style and guidel
 
 Before submitting your changes, run the existing tests to ensure everything works as expected:
 
-\`\`\`bash
+```bash
 make test
-\`\`\`
+```
 
 If you're adding a new feature or fixing a bug, consider adding corresponding tests in the \`tests/\` directory.
 
@@ -45,18 +45,18 @@ If you're adding a new feature or fixing a bug, consider adding corresponding te
 
 Once you're done, commit your changes to the branch:
 
-\`\`\`bash
+```bash
 git add .
 git commit -m "Describe your changes"
-\`\`\`
+```
 
 ### 7. Push your changes
 
 Push the changes to your fork:
 
-\`\`\`bash
+```bash
 git push origin feature-branch
-\`\`\`
+```
 
 ### 8. Create a pull request
 
@@ -75,4 +75,3 @@ If you find a bug or have a feature request, please open an issue in the [Issues
 By contributing to **hostRecon**, you agree that your contributions will be licensed under the project's license (e.g., MIT, GPL).
 
 Thank you for your interest in contributing to **hostRecon**! We look forward to your contributions.
-"""
